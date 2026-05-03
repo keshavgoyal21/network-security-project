@@ -28,6 +28,7 @@ Generated file:
 
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
@@ -43,6 +44,8 @@ from sklearn.preprocessing import StandardScaler
 
 DATASET_FILE = "PhiUSIIL_Phishing_URL_Dataset.csv"
 RESULTS_FILE = "real_dataset_results.txt"
+CONFUSION_MATRIX_IMAGE = "real_confusion_matrix.png"
+FEATURE_IMPORTANCE_IMAGE = "real_feature_importance.png"
 TARGET_COLUMN = "label"
 PROJECT_TARGET_COLUMN = "phishing_label"
 
@@ -252,14 +255,17 @@ def build_metrics_table(metrics: list[dict[str, float | str]]) -> pd.DataFrame:
 def build_confusion_matrix_table(
     y_test: pd.Series,
     y_pred: np.ndarray,
+    model_name: str,
 ) -> pd.DataFrame:
     """Create confusion matrix as a formatted table."""
     matrix = confusion_matrix(y_test, y_pred, labels=[PROJECT_SAFE_LABEL, PROJECT_PHISHING_LABEL])
-    return pd.DataFrame(
+    matrix_table = pd.DataFrame(
         matrix,
         index=["Actual Safe", "Actual Phishing"],
         columns=["Predicted Safe", "Predicted Phishing"],
     ).reset_index(names="Actual / Predicted")
+    matrix_table.insert(0, "Model", model_name)
+    return matrix_table
 
 
 def build_feature_importance_table(
@@ -279,6 +285,66 @@ def build_feature_importance_table(
     )
     importance_table["Importance Score"] = importance_table["Importance Score"].round(6)
     return importance_table
+
+
+def save_confusion_matrix_image(
+    y_test: pd.Series,
+    y_pred: np.ndarray,
+    model_name: str,
+    output_file: str = CONFUSION_MATRIX_IMAGE,
+) -> None:
+    """Save the confusion matrix as a PNG diagram."""
+    matrix = confusion_matrix(
+        y_test,
+        y_pred,
+        labels=[PROJECT_SAFE_LABEL, PROJECT_PHISHING_LABEL],
+    )
+
+    plt.figure(figsize=(7, 5))
+    plt.imshow(matrix, cmap="Blues")
+    plt.title(f"Confusion Matrix - {model_name}")
+    plt.xlabel("Predicted Label")
+    plt.ylabel("Actual Label")
+    plt.xticks([0, 1], LABEL_NAMES)
+    plt.yticks([0, 1], LABEL_NAMES)
+
+    for row_index in range(matrix.shape[0]):
+        for column_index in range(matrix.shape[1]):
+            plt.text(
+                column_index,
+                row_index,
+                matrix[row_index, column_index],
+                ha="center",
+                va="center",
+                color="black",
+                fontsize=12,
+            )
+
+    plt.colorbar()
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=150)
+    plt.close()
+
+
+def save_feature_importance_image(
+    feature_importance_table: pd.DataFrame,
+    output_file: str = FEATURE_IMPORTANCE_IMAGE,
+) -> None:
+    """Save the top Random Forest feature importances as a PNG diagram."""
+    top_features = feature_importance_table.head(TOP_FEATURE_COUNT).copy()
+
+    plt.figure(figsize=(10, 7))
+    plt.barh(
+        top_features["Feature"],
+        top_features["Importance Score"],
+    )
+    plt.xlabel("Importance Score")
+    plt.ylabel("Feature")
+    plt.title("Random Forest Feature Importance")
+    plt.gca().invert_yaxis()
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=150)
+    plt.close()
 
 
 def run_project() -> None:
@@ -402,9 +468,42 @@ def run_project() -> None:
         else logistic_predictions
     )
 
-    print_and_store(report_lines, make_heading("STEP 10: CONFUSION MATRIX TABLE"))
-    print_and_store(report_lines, f"Best Model Used For Confusion Matrix: {best_model_name}")
-    print_and_store(report_lines, format_table(build_confusion_matrix_table(y_test, best_predictions)))
+    print_and_store(report_lines, make_heading("STEP 10: CONFUSION MATRIX TABLES"))
+    confusion_matrix_tables = pd.concat(
+        [
+            build_confusion_matrix_table(
+                y_test,
+                logistic_predictions,
+                "Logistic Regression",
+            ),
+            build_confusion_matrix_table(
+                y_test,
+                random_forest_predictions,
+                "Random Forest",
+            ),
+        ],
+        ignore_index=True,
+    )
+    print_and_store(report_lines, format_table(confusion_matrix_tables))
+
+    print_and_store(report_lines, make_heading("STEP 10A: CONFUSION MATRIX MEANING"))
+    matrix_meaning_table = pd.DataFrame(
+        {
+            "Term": [
+                "Predicted Safe",
+                "Predicted Phishing",
+                "Actual Safe",
+                "Actual Phishing",
+            ],
+            "Meaning": [
+                "Model predicted the URL as safe",
+                "Model predicted the URL as phishing",
+                "URL is truly safe in the dataset",
+                "URL is truly phishing in the dataset",
+            ],
+        }
+    )
+    print_and_store(report_lines, format_table(matrix_meaning_table))
 
     print_and_store(report_lines, make_heading("STEP 11: MODEL COMPARISON TABLE"))
     comparison_table = metrics_table.copy()
@@ -420,6 +519,24 @@ def run_project() -> None:
         x.columns.tolist(),
     )
     print_and_store(report_lines, format_table(feature_importance_table.head(TOP_FEATURE_COUNT)))
+
+    save_confusion_matrix_image(y_test, best_predictions, best_model_name)
+    save_feature_importance_image(feature_importance_table)
+
+    print_and_store(report_lines, make_heading("STEP 13: SAVED DIAGRAM FILES"))
+    diagram_table = pd.DataFrame(
+        {
+            "Diagram": [
+                "Confusion Matrix",
+                "Random Forest Feature Importance",
+            ],
+            "Saved File": [
+                CONFUSION_MATRIX_IMAGE,
+                FEATURE_IMPORTANCE_IMAGE,
+            ],
+        }
+    )
+    print_and_store(report_lines, format_table(diagram_table))
 
     print_and_store(report_lines, make_heading("FINAL RESULT"))
     final_result_table = pd.DataFrame(
