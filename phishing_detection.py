@@ -23,7 +23,7 @@ How to run:
 
 Generated file:
 
-- real_dataset_results.txt
+- No output files are generated. Tables print on screen and diagrams display on screen.
 """
 
 import numpy as np
@@ -43,9 +43,6 @@ from sklearn.preprocessing import StandardScaler
 
 
 DATASET_FILE = "PhiUSIIL_Phishing_URL_Dataset.csv"
-RESULTS_FILE = "real_dataset_results.txt"
-CONFUSION_MATRIX_IMAGE = "real_confusion_matrix.png"
-FEATURE_IMPORTANCE_IMAGE = "real_feature_importance.png"
 TARGET_COLUMN = "label"
 PROJECT_TARGET_COLUMN = "phishing_label"
 
@@ -287,13 +284,12 @@ def build_feature_importance_table(
     return importance_table
 
 
-def save_confusion_matrix_image(
+def show_confusion_matrix_diagram(
     y_test: pd.Series,
     y_pred: np.ndarray,
     model_name: str,
-    output_file: str = CONFUSION_MATRIX_IMAGE,
 ) -> None:
-    """Save the confusion matrix as a PNG diagram."""
+    """Display the confusion matrix diagram on screen without saving it."""
     matrix = confusion_matrix(
         y_test,
         y_pred,
@@ -322,15 +318,13 @@ def save_confusion_matrix_image(
 
     plt.colorbar()
     plt.tight_layout()
-    plt.savefig(output_file, dpi=150)
-    plt.close()
+    plt.show()
 
 
-def save_feature_importance_image(
+def show_feature_importance_diagram(
     feature_importance_table: pd.DataFrame,
-    output_file: str = FEATURE_IMPORTANCE_IMAGE,
 ) -> None:
-    """Save the top Random Forest feature importances as a PNG diagram."""
+    """Display top Random Forest feature importances on screen without saving them."""
     top_features = feature_importance_table.head(TOP_FEATURE_COUNT).copy()
 
     plt.figure(figsize=(10, 7))
@@ -343,8 +337,7 @@ def save_feature_importance_image(
     plt.title("Random Forest Feature Importance")
     plt.gca().invert_yaxis()
     plt.tight_layout()
-    plt.savefig(output_file, dpi=150)
-    plt.close()
+    plt.show()
 
 
 def run_project() -> None:
@@ -520,19 +513,23 @@ def run_project() -> None:
     )
     print_and_store(report_lines, format_table(feature_importance_table.head(TOP_FEATURE_COUNT)))
 
-    save_confusion_matrix_image(y_test, best_predictions, best_model_name)
-    save_feature_importance_image(feature_importance_table)
+    show_confusion_matrix_diagram(y_test, best_predictions, best_model_name)
+    show_feature_importance_diagram(feature_importance_table)
 
-    print_and_store(report_lines, make_heading("STEP 13: SAVED DIAGRAM FILES"))
+    print_and_store(report_lines, make_heading("STEP 13: DIAGRAM DISPLAY STATUS"))
     diagram_table = pd.DataFrame(
         {
             "Diagram": [
                 "Confusion Matrix",
                 "Random Forest Feature Importance",
             ],
-            "Saved File": [
-                CONFUSION_MATRIX_IMAGE,
-                FEATURE_IMPORTANCE_IMAGE,
+            "Output Method": [
+                "Displayed on screen only",
+                "Displayed on screen only",
+            ],
+            "Saved In Folder": [
+                "No",
+                "No",
             ],
         }
     )
@@ -558,9 +555,6 @@ def run_project() -> None:
         }
     )
     print_and_store(report_lines, format_table(final_result_table))
-
-    with open(RESULTS_FILE, "w", encoding="utf-8") as file:
-        file.write("\n".join(report_lines))
 
 
 if __name__ == "__main__":
