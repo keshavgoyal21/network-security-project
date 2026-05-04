@@ -1,29 +1,23 @@
 """
-Phishing Detection Project Using Real PhiUSIIL Dataset
-======================================================
+Phishing Detection System
+=========================
 
-This project uses a labelled phishing URL dataset for a binary classification
-task. The original PhiUSIIL dataset label values are:
+Classifies URLs as Safe or Phishing using 5 URL-based features selected from
+the PhiUSIIL labelled dataset.
 
-- 1 = legitimate / safe
-- 0 = phishing
+The dataset contains precomputed phishing-related URL features. Only
+assignment-relevant URL-based features were selected. The required features
+(URL length, HTTPS presence, and special character count) are used along with
+two additional URL-based indicators: subdomain count and IP-domain detection.
 
-For this project, labels are converted to the common project format:
-
-- 0 = safe
-- 1 = phishing
+Label mapping (original dataset):
+    1 = legitimate / safe  →  project label 0 = Safe
+    0 = phishing           →  project label 1 = Phishing
 
 How to run:
-
-1. Put `PhiUSIIL_Phishing_URL_Dataset.csv` in the same folder as this script.
-2. Install dependencies:
-   pip install pandas numpy scikit-learn
-3. Run:
-   python phishing_real_dataset_project.py
-
-Generated file:
-
-- No output files are generated. Tables print on screen and diagrams display on screen.
+    1. Place PhiUSIIL_Phishing_URL_Dataset.csv in the same folder as this script.
+    2. pip install pandas numpy scikit-learn matplotlib
+    3. python phishing_detection.py
 """
 
 import numpy as np
@@ -37,524 +31,449 @@ from sklearn.metrics import (
     f1_score,
     precision_score,
     recall_score,
+    roc_curve,
+    roc_auc_score,
 )
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
+# ──────────────────────────────────────────────
+# Configuration
+# ──────────────────────────────────────────────
 
 DATASET_FILE = "PhiUSIIL_Phishing_URL_Dataset.csv"
-TARGET_COLUMN = "label"
-PROJECT_TARGET_COLUMN = "phishing_label"
 
-TEST_SIZE = 0.2
-RANDOM_STATE = 42
-RANDOM_FOREST_TREES = 100
-LOGISTIC_REGRESSION_MAX_ITER = 1000
-TOP_FEATURE_COUNT = 20
+# Exactly the 5 features required by the assignment
+SELECTED_FEATURES = [
+    "URLLength",                   # Required: URL length
+    "IsHTTPS",                     # Required: HTTPS presence (1 = yes, 0 = no)
+    "NoOfOtherSpecialCharsInURL",  # Required: special character count
+    "NoOfSubDomain",               # Extra: subdomain count
+    "IsDomainIP",                  # Extra: IP-based domain flag
+]
 
-ORIGINAL_SAFE_LABEL = 1
-ORIGINAL_PHISHING_LABEL = 0
-PROJECT_SAFE_LABEL = 0
-PROJECT_PHISHING_LABEL = 1
+TARGET_COLUMN = "label"           # Original dataset label column
 
-TEXT_COLUMNS_TO_DROP = ["FILENAME", "URL", "Domain", "Title"]
-CATEGORICAL_COLUMNS = ["TLD"]
+# Original dataset encoding  →  project encoding
+ORIGINAL_SAFE_LABEL     = 1       # dataset: 1 = legitimate
+ORIGINAL_PHISHING_LABEL = 0       # dataset: 0 = phishing
+PROJECT_SAFE_LABEL      = 0       # project: 0 = Safe
+PROJECT_PHISHING_LABEL  = 1       # project: 1 = Phishing
 
-LABEL_NAMES = ["Safe", "Phishing"]
+LABEL_NAMES   = ["Safe", "Phishing"]
+TEST_SIZE     = 0.2
+RANDOM_STATE  = 42
+RF_TREES      = 100
+LR_MAX_ITER   = 1000
 
 
-def make_heading(title: str) -> str:
-    """Create a clean heading for report-style output."""
+# ──────────────────────────────────────────────
+# Utility helpers
+# ──────────────────────────────────────────────
+
+def heading(title: str) -> str:
     border = "=" * len(title)
     return f"\n{border}\n{title}\n{border}"
 
 
-def format_table(dataframe: pd.DataFrame, max_rows: int | None = None) -> str:
-    """Convert a DataFrame into a readable aligned table."""
-    if max_rows is not None:
-        dataframe = dataframe.head(max_rows)
-    return dataframe.to_string(index=False)
+def fmt(df: pd.DataFrame, rows: int | None = None) -> str:
+    return (df.head(rows) if rows else df).to_string(index=False)
 
 
-def print_and_store(lines: list[str], text: str = "") -> None:
-    """Print text to screen and also store it for the results file."""
-    print(text)
-    lines.append(text)
+# ──────────────────────────────────────────────
+# Data loading & preparation
+# ──────────────────────────────────────────────
 
+def load_and_prepare(file_path: str) -> tuple[pd.DataFrame, pd.Series]:
+    """
+    Load the CSV, select the 5 features, convert labels, drop any rows with
+    missing values in the selected columns.
+    """
+    raw = pd.read_csv(file_path, low_memory=False)
 
-def load_dataset(file_path: str) -> pd.DataFrame:
-    """Load the CSV dataset into a Pandas DataFrame."""
-    return pd.read_csv(file_path, low_memory=False)
+    # Keep only the 5 chosen features + label
+    cols_needed = SELECTED_FEATURES + [TARGET_COLUMN]
+    df = raw[cols_needed].copy()
 
-
-def get_dataset_summary(dataset: pd.DataFrame) -> pd.DataFrame:
-    """Create a table containing column names, data types, and non-null counts."""
-    summary = pd.DataFrame(
+    # Convert original labels → project labels
+    df["phishing_label"] = df[TARGET_COLUMN].map(
         {
-            "Column": dataset.columns,
-            "Data Type": dataset.dtypes.astype(str).values,
-            "Non-Null Count": dataset.notna().sum().values,
-            "Missing Count": dataset.isna().sum().values,
-        }
-    )
-    return summary
-
-
-def get_missing_values_table(dataset: pd.DataFrame) -> pd.DataFrame:
-    """Create a table showing missing values for every column."""
-    missing_count = dataset.isna().sum()
-    missing_percentage = (missing_count / len(dataset)) * 100
-    missing_table = pd.DataFrame(
-        {
-            "Column": missing_count.index,
-            "Missing Values": missing_count.values,
-            "Missing Percentage": missing_percentage.round(4).values,
-        }
-    )
-    return missing_table
-
-
-def identify_features_and_target(dataset: pd.DataFrame) -> tuple[list[str], str]:
-    """Identify independent feature columns and dependent target column."""
-    feature_columns = [column for column in dataset.columns if column != TARGET_COLUMN]
-    return feature_columns, TARGET_COLUMN
-
-
-def convert_target_labels(dataset: pd.DataFrame) -> pd.DataFrame:
-    """Convert original dataset labels into project labels: 0 safe, 1 phishing."""
-    converted_dataset = dataset.copy()
-    converted_dataset[PROJECT_TARGET_COLUMN] = converted_dataset[TARGET_COLUMN].map(
-        {
-            ORIGINAL_SAFE_LABEL: PROJECT_SAFE_LABEL,
+            ORIGINAL_SAFE_LABEL:     PROJECT_SAFE_LABEL,
             ORIGINAL_PHISHING_LABEL: PROJECT_PHISHING_LABEL,
         }
     )
-    return converted_dataset
+
+    # Drop rows where any selected feature or label is missing
+    df.dropna(subset=SELECTED_FEATURES + ["phishing_label"], inplace=True)
+
+    X = df[SELECTED_FEATURES].astype(float)
+    y = df["phishing_label"].astype(int)
+
+    return X, y
 
 
-def preprocess_dataset(dataset: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
-    """Handle missing values, encode categorical columns, and prepare X and y."""
-    processed_dataset = convert_target_labels(dataset)
-    y = processed_dataset[PROJECT_TARGET_COLUMN].astype(int)
-
-    columns_to_drop = [TARGET_COLUMN, PROJECT_TARGET_COLUMN]
-    columns_to_drop.extend(
-        column for column in TEXT_COLUMNS_TO_DROP if column in processed_dataset.columns
-    )
-
-    x = processed_dataset.drop(columns=columns_to_drop)
-
-    numeric_columns = x.select_dtypes(include=[np.number]).columns.tolist()
-    categorical_columns = [
-        column for column in CATEGORICAL_COLUMNS if column in x.columns
-    ]
-
-    numeric_features = x[numeric_columns].copy()
-    categorical_features = x[categorical_columns].copy()
-
-    for column in numeric_features.columns:
-        median_value = numeric_features[column].median()
-        numeric_features[column] = numeric_features[column].fillna(median_value)
-
-    for column in categorical_features.columns:
-        mode_values = categorical_features[column].mode()
-        fill_value = mode_values.iloc[0] if not mode_values.empty else "Unknown"
-        categorical_features[column] = categorical_features[column].fillna(fill_value)
-
-    encoded_categorical = pd.get_dummies(
-        categorical_features,
-        columns=categorical_columns,
-        drop_first=True,
-        dtype=int,
-    )
-
-    x_processed = pd.concat([numeric_features, encoded_categorical], axis=1)
-    return x_processed, y
-
-
-def get_split_table(
-    x_train: pd.DataFrame,
-    x_test: pd.DataFrame,
-    y_train: pd.Series,
-    y_test: pd.Series,
-) -> pd.DataFrame:
-    """Create a table showing train-test split information."""
-    total_rows = len(x_train) + len(x_test)
-    split_table = pd.DataFrame(
-        {
-            "Dataset Part": ["Training Set", "Testing Set", "Total Dataset"],
-            "Rows": [len(x_train), len(x_test), total_rows],
-            "Percentage": [
-                round((len(x_train) / total_rows) * 100, 2),
-                round((len(x_test) / total_rows) * 100, 2),
-                100.00,
-            ],
-            "Features": [x_train.shape[1], x_test.shape[1], x_train.shape[1]],
-            "Target Rows": [len(y_train), len(y_test), len(y_train) + len(y_test)],
-        }
-    )
-    return split_table
-
+# ──────────────────────────────────────────────
+# Model training
+# ──────────────────────────────────────────────
 
 def train_logistic_regression(
-    x_train: pd.DataFrame,
-    y_train: pd.Series,
+    X_train: pd.DataFrame, y_train: pd.Series
 ) -> tuple[LogisticRegression, StandardScaler]:
-    """Scale features and train a Logistic Regression model."""
     scaler = StandardScaler()
-    x_train_scaled = scaler.fit_transform(x_train)
-
-    model = LogisticRegression(
-        max_iter=LOGISTIC_REGRESSION_MAX_ITER,
-        random_state=RANDOM_STATE,
-    )
-    model.fit(x_train_scaled, y_train)
+    X_scaled = scaler.fit_transform(X_train)
+    model = LogisticRegression(max_iter=LR_MAX_ITER, random_state=RANDOM_STATE)
+    model.fit(X_scaled, y_train)
     return model, scaler
 
 
 def train_random_forest(
-    x_train: pd.DataFrame,
-    y_train: pd.Series,
+    X_train: pd.DataFrame, y_train: pd.Series
 ) -> RandomForestClassifier:
-    """Train a Random Forest classification model."""
     model = RandomForestClassifier(
-        n_estimators=RANDOM_FOREST_TREES,
-        random_state=RANDOM_STATE,
-        n_jobs=-1,
+        n_estimators=RF_TREES, random_state=RANDOM_STATE, n_jobs=-1
     )
-    model.fit(x_train, y_train)
+    model.fit(X_train, y_train)
     return model
 
 
-def evaluate_model(
-    model_name: str,
-    y_test: pd.Series,
-    y_pred: np.ndarray,
-) -> dict[str, float | str]:
-    """Calculate classification metrics for one model."""
+# ──────────────────────────────────────────────
+# Evaluation helpers
+# ──────────────────────────────────────────────
+
+def evaluate(name: str, y_true, y_pred) -> dict:
     return {
-        "Model": model_name,
-        "Accuracy": accuracy_score(y_test, y_pred),
-        "Precision": precision_score(y_test, y_pred, zero_division=0),
-        "Recall": recall_score(y_test, y_pred, zero_division=0),
-        "F1 Score": f1_score(y_test, y_pred, zero_division=0),
+        "Model":     name,
+        "Accuracy":  round(accuracy_score(y_true, y_pred), 4),
+        "Precision": round(precision_score(y_true, y_pred, zero_division=0), 4),
+        "Recall":    round(recall_score(y_true, y_pred, zero_division=0), 4),
+        "F1 Score":  round(f1_score(y_true, y_pred, zero_division=0), 4),
     }
 
 
-def build_metrics_table(metrics: list[dict[str, float | str]]) -> pd.DataFrame:
-    """Create a formatted model comparison metrics table."""
-    metrics_table = pd.DataFrame(metrics)
-    numeric_columns = ["Accuracy", "Precision", "Recall", "F1 Score"]
-    metrics_table[numeric_columns] = metrics_table[numeric_columns].round(4)
-    return metrics_table
-
-
-def build_confusion_matrix_table(
-    y_test: pd.Series,
-    y_pred: np.ndarray,
-    model_name: str,
-) -> pd.DataFrame:
-    """Create confusion matrix as a formatted table."""
-    matrix = confusion_matrix(y_test, y_pred, labels=[PROJECT_SAFE_LABEL, PROJECT_PHISHING_LABEL])
-    matrix_table = pd.DataFrame(
-        matrix,
-        index=["Actual Safe", "Actual Phishing"],
-        columns=["Predicted Safe", "Predicted Phishing"],
-    ).reset_index(names="Actual / Predicted")
-    matrix_table.insert(0, "Model", model_name)
-    return matrix_table
-
-
-def build_feature_importance_table(
-    model: RandomForestClassifier,
-    feature_names: list[str],
-) -> pd.DataFrame:
-    """Create a feature importance table from the Random Forest model."""
-    importance_table = pd.DataFrame(
+def confusion_table(y_true, y_pred, name: str) -> pd.DataFrame:
+    cm = confusion_matrix(y_true, y_pred)
+    return pd.DataFrame(
         {
-            "Feature": feature_names,
-            "Importance Score": model.feature_importances_,
+            "Model":              [name] * 4,
+            "Actual":             ["Safe", "Safe", "Phishing", "Phishing"],
+            "Predicted":          ["Safe", "Phishing", "Safe", "Phishing"],
+            "Count":              [cm[0, 0], cm[0, 1], cm[1, 0], cm[1, 1]],
+            "Description":        [
+                "True Negative  (TN)",
+                "False Positive (FP)",
+                "False Negative (FN)",
+                "True Positive  (TP)",
+            ],
         }
     )
-    importance_table = importance_table.sort_values(
-        "Importance Score",
-        ascending=False,
-    )
-    importance_table["Importance Score"] = importance_table["Importance Score"].round(6)
-    return importance_table
 
 
-def show_confusion_matrix_diagram(
-    y_test: pd.Series,
-    y_pred: np.ndarray,
-    model_name: str,
-) -> None:
-    """Display the confusion matrix diagram on screen without saving it."""
-    matrix = confusion_matrix(
-        y_test,
-        y_pred,
-        labels=[PROJECT_SAFE_LABEL, PROJECT_PHISHING_LABEL],
+def show_confusion_matrix(y_true, y_pred, title: str) -> None:
+    cm = confusion_matrix(y_true, y_pred)
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
+    plt.colorbar(im, ax=ax)
+    ax.set(
+        xticks=[0, 1], yticks=[0, 1],
+        xticklabels=LABEL_NAMES, yticklabels=LABEL_NAMES,
+        xlabel="Predicted Label", ylabel="True Label",
+        title=f"Confusion Matrix – {title}",
     )
+    thresh = cm.max() / 2
+    for i in range(2):
+        for j in range(2):
+            ax.text(j, i, cm[i, j], ha="center", va="center",
+                    color="white" if cm[i, j] > thresh else "black")
+    plt.tight_layout()
+    plt.show()
+
+
+def show_feature_importance(model: RandomForestClassifier, features: list[str]) -> None:
+    importances = model.feature_importances_
+    fi = pd.DataFrame({"Feature": features, "Importance": importances})
+    fi.sort_values("Importance", ascending=True, inplace=True)
+
+    plt.figure(figsize=(7, 4))
+    plt.barh(fi["Feature"], fi["Importance"], color="steelblue")
+    plt.xlabel("Importance Score")
+    plt.title("Random Forest – Feature Importance")
+    plt.tight_layout()
+    plt.show()
+
+
+# ──────────────────────────────────────────────
+# Sample predictions using manual URL properties
+# ──────────────────────────────────────────────
+
+SAMPLE_URLS = [
+    {
+        "url":         "https://google.com",
+        "URLLength":                  18,
+        "IsHTTPS":                     1,
+        "NoOfOtherSpecialCharsInURL":  0,
+        "NoOfSubDomain":               0,
+        "IsDomainIP":                  0,
+    },
+    {
+        "url":         "http://paypal-login-security-update.xyz/verify?user=abc&token=xyz",
+        "URLLength":                  63,
+        "IsHTTPS":                     0,
+        "NoOfOtherSpecialCharsInURL":  5,
+        "NoOfSubDomain":               1,
+        "IsDomainIP":                  0,
+    },
+    {
+        "url":         "http://192.168.1.1/admin/login",
+        "URLLength":                  30,
+        "IsHTTPS":                     0,
+        "NoOfOtherSpecialCharsInURL":  2,
+        "NoOfSubDomain":               0,
+        "IsDomainIP":                  1,
+    },
+    {
+        "url":         "https://mail.google.com/mail/u/0/#inbox",
+        "URLLength":                  39,
+        "IsHTTPS":                     1,
+        "NoOfOtherSpecialCharsInURL":  2,
+        "NoOfSubDomain":               1,
+        "IsDomainIP":                  0,
+    },
+    {
+        "url":         "http://free-iphone-winner.xyz/claim?ref=abc&promo=1&id=99",
+        "URLLength":                  57,
+        "IsHTTPS":                     0,
+        "NoOfOtherSpecialCharsInURL":  6,
+        "NoOfSubDomain":               1,
+        "IsDomainIP":                  0,
+    },
+]
+
+
+def show_sample_predictions(model, scaler, sample_urls: list[dict]) -> pd.DataFrame:
+    rows = []
+    for entry in sample_urls:
+        # Use a DataFrame with proper column names to avoid sklearn feature-name warning
+        feats_df = pd.DataFrame(
+            [[
+                entry["URLLength"],
+                entry["IsHTTPS"],
+                entry["NoOfOtherSpecialCharsInURL"],
+                entry["NoOfSubDomain"],
+                entry["IsDomainIP"],
+            ]],
+            columns=SELECTED_FEATURES,
+        )
+        feats_scaled = scaler.transform(feats_df)
+        pred = model.predict(feats_scaled)[0]
+        rows.append({
+            "URL":        entry["url"],
+            "Prediction": LABEL_NAMES[pred],
+        })
+    return pd.DataFrame(rows)
+
+
+def show_train_vs_test(lr_model, scaler, rf_model, X_train, y_train, X_test, y_test) -> None:
+    """Combined bar chart comparing train vs test accuracy for both models."""
+    lr_train_acc = accuracy_score(y_train, lr_model.predict(scaler.transform(X_train)))
+    lr_test_acc  = accuracy_score(y_test,  lr_model.predict(scaler.transform(X_test)))
+    rf_train_acc = accuracy_score(y_train, rf_model.predict(X_train))
+    rf_test_acc  = accuracy_score(y_test,  rf_model.predict(X_test))
+
+    models = ["Logistic Regression", "Random Forest"]
+    train_scores = [lr_train_acc, rf_train_acc]
+    test_scores  = [lr_test_acc,  rf_test_acc]
+    x = np.arange(len(models))
+    width = 0.35
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    bars1 = ax.bar(x - width / 2, train_scores, width, label="Train Accuracy", color="steelblue")
+    bars2 = ax.bar(x + width / 2, test_scores,  width, label="Test Accuracy",  color="coral")
+    ax.set_ylim(0, 1.1)
+    ax.set_ylabel("Accuracy")
+    ax.set_title("Train vs Test Accuracy – Model Comparison")
+    ax.set_xticks(x)
+    ax.set_xticklabels(models)
+    ax.legend()
+    for bar in list(bars1) + list(bars2):
+        ax.annotate(
+            f"{bar.get_height():.4f}",
+            xy=(bar.get_x() + bar.get_width() / 2, bar.get_height()),
+            xytext=(0, 4), textcoords="offset points",
+            ha="center", va="bottom", fontsize=9,
+        )
+    plt.tight_layout()
+    plt.show()
+
+
+def show_roc_curves(lr_model, scaler, rf_model, X_test, y_test) -> None:
+    """ROC curve for both models on one plot."""
+    lr_probs = lr_model.predict_proba(scaler.transform(X_test))[:, 1]
+    rf_probs = rf_model.predict_proba(X_test)[:, 1]
+
+    lr_fpr, lr_tpr, _ = roc_curve(y_test, lr_probs)
+    rf_fpr, rf_tpr, _ = roc_curve(y_test, rf_probs)
+    lr_auc = roc_auc_score(y_test, lr_probs)
+    rf_auc = roc_auc_score(y_test, rf_probs)
 
     plt.figure(figsize=(7, 5))
-    plt.imshow(matrix, cmap="Blues")
-    plt.title(f"Confusion Matrix - {model_name}")
-    plt.xlabel("Predicted Label")
-    plt.ylabel("Actual Label")
-    plt.xticks([0, 1], LABEL_NAMES)
-    plt.yticks([0, 1], LABEL_NAMES)
-
-    for row_index in range(matrix.shape[0]):
-        for column_index in range(matrix.shape[1]):
-            plt.text(
-                column_index,
-                row_index,
-                matrix[row_index, column_index],
-                ha="center",
-                va="center",
-                color="black",
-                fontsize=12,
-            )
-
-    plt.colorbar()
+    plt.plot(lr_fpr, lr_tpr, label=f"Logistic Regression  (AUC = {lr_auc:.4f})", color="steelblue")
+    plt.plot(rf_fpr, rf_tpr, label=f"Random Forest        (AUC = {rf_auc:.4f})", color="coral")
+    plt.plot([0, 1], [0, 1], linestyle="--", color="grey", label="Random Classifier")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC Curve – Model Comparison")
+    plt.legend(loc="lower right")
     plt.tight_layout()
     plt.show()
 
 
-def show_feature_importance_diagram(
-    feature_importance_table: pd.DataFrame,
-) -> None:
-    """Display top Random Forest feature importances on screen without saving them."""
-    top_features = feature_importance_table.head(TOP_FEATURE_COUNT).copy()
-
-    plt.figure(figsize=(10, 7))
-    plt.barh(
-        top_features["Feature"],
-        top_features["Importance Score"],
-    )
-    plt.xlabel("Importance Score")
-    plt.ylabel("Feature")
-    plt.title("Random Forest Feature Importance")
-    plt.gca().invert_yaxis()
-    plt.tight_layout()
-    plt.show()
-
+# ──────────────────────────────────────────────
+# Main pipeline
+# ──────────────────────────────────────────────
 
 def run_project() -> None:
-    """Run the complete real-dataset phishing classification project."""
-    report_lines: list[str] = []
+    print(heading("PHISHING DETECTION SYSTEM"))
+    print("Features used:", SELECTED_FEATURES)
 
-    print_and_store(report_lines, make_heading("PHISHING DETECTION PROJECT USING REAL LABELLED DATASET"))
+    # ── Step 1: Load dataset ──────────────────
+    print(heading("STEP 1: LOAD DATASET"))
+    X, y = load_and_prepare(DATASET_FILE)
+    print(f"Total samples loaded : {len(X):,}")
+    print(f"Safe (0)             : {(y == 0).sum():,}")
+    print(f"Phishing (1)         : {(y == 1).sum():,}")
 
-    dataset = load_dataset(DATASET_FILE)
+    # ── Step 2: Feature preview ───────────────
+    print(heading("STEP 2: SELECTED FEATURES PREVIEW (first 5 rows)"))
+    preview = X.head(5).copy()
+    preview["Label"] = y.head(5).values
+    print(fmt(preview))
 
-    print_and_store(report_lines, make_heading("STEP 1: FIRST 5 ROWS OF DATASET"))
-    display_columns = [
-        "URL",
-        "URLLength",
-        "Domain",
-        "DomainLength",
-        "TLD",
-        "IsHTTPS",
-        "label",
-    ]
-    available_display_columns = [
-        column for column in display_columns if column in dataset.columns
-    ]
-    print_and_store(
-        report_lines,
-        format_table(dataset[available_display_columns].head(5)),
-    )
-
-    print_and_store(report_lines, make_heading("STEP 2: FEATURES AND TARGET VARIABLE"))
-    feature_columns, target_column = identify_features_and_target(dataset)
-    features_target_table = pd.DataFrame(
+    feature_info = pd.DataFrame(
         {
-            "Item": ["Independent Variables / Features", "Dependent Variable / Target"],
-            "Columns": [", ".join(feature_columns[:12]) + " ...", target_column],
-            "Meaning": [
-                "URL and website properties used for prediction",
-                "Original class label from dataset",
+            "Feature":     SELECTED_FEATURES,
+            "Type":        ["Required", "Required", "Required", "Extra", "Extra"],
+            "Description": [
+                "Length of the URL",
+                "1 = HTTPS, 0 = HTTP",
+                "Count of suspicious special characters",
+                "Number of subdomains in the URL",
+                "1 if domain is an IP address, else 0",
             ],
         }
     )
-    print_and_store(report_lines, format_table(features_target_table))
+    print(f"\nFeature descriptions:\n{fmt(feature_info)}")
 
-    print_and_store(report_lines, make_heading("STEP 3: DATASET SUMMARY"))
-    print_and_store(report_lines, format_table(get_dataset_summary(dataset)))
-
-    print_and_store(report_lines, make_heading("STEP 4: MISSING VALUES TABLE"))
-    print_and_store(report_lines, format_table(get_missing_values_table(dataset)))
-
-    print_and_store(report_lines, make_heading("STEP 5: DATA PREPROCESSING AND ENCODING"))
-    x, y = preprocess_dataset(dataset)
-    preprocessing_table = pd.DataFrame(
+    # ── Step 3: Train-test split ──────────────
+    print(heading("STEP 3: TRAIN-TEST SPLIT  (80% / 20%)"))
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y
+    )
+    split_table = pd.DataFrame(
         {
-            "Preprocessing Task": [
-                "Missing numeric values",
-                "Missing categorical values",
-                "Categorical encoding",
-                "Dropped text identifier columns",
-                "Target conversion",
-                "Feature scaling",
-            ],
-            "Action Taken": [
-                "Filled using median",
-                "Filled using mode",
-                "TLD encoded using one-hot encoding",
-                ", ".join(TEXT_COLUMNS_TO_DROP),
-                "Original label converted to 0 = Safe, 1 = Phishing",
-                "Applied only for Logistic Regression",
+            "Partition": ["Training Set", "Testing Set"],
+            "Rows":      [len(X_train), len(X_test)],
+            "Pct":       [
+                f"{len(X_train)/len(X)*100:.1f}%",
+                f"{len(X_test)/len(X)*100:.1f}%",
             ],
         }
     )
-    print_and_store(report_lines, format_table(preprocessing_table))
+    print(fmt(split_table))
 
-    print_and_store(report_lines, make_heading("STEP 6: ENCODED DATASET PREVIEW"))
-    preview_columns = x.columns[:15].tolist()
-    encoded_preview = x[preview_columns].head(5).copy()
-    encoded_preview[PROJECT_TARGET_COLUMN] = y.head(5).values
-    print_and_store(report_lines, format_table(encoded_preview, max_rows=5))
+    # ── Step 4: Train models ──────────────────
+    print(heading("STEP 4: MODEL TRAINING"))
+    lr_model, scaler      = train_logistic_regression(X_train, y_train)
+    rf_model              = train_random_forest(X_train, y_train)
+    print("✔ Logistic Regression trained")
+    print("✔ Random Forest trained")
 
-    x_train, x_test, y_train, y_test = train_test_split(
-        x,
-        y,
-        test_size=TEST_SIZE,
-        random_state=RANDOM_STATE,
-        stratify=y,
-    )
+    # ── Step 5: Predictions ───────────────────
+    lr_pred = lr_model.predict(scaler.transform(X_test))
+    rf_pred = rf_model.predict(X_test)
 
-    print_and_store(report_lines, make_heading("STEP 7: TRAIN-TEST SPLIT"))
-    print_and_store(report_lines, format_table(get_split_table(x_train, x_test, y_train, y_test)))
+    # ── Step 6: Evaluation metrics ────────────
+    print(heading("STEP 5: EVALUATION METRICS"))
+    metrics = pd.DataFrame([
+        evaluate("Logistic Regression", y_test, lr_pred),
+        evaluate("Random Forest",       y_test, rf_pred),
+    ])
+    print(fmt(metrics))
 
-    print_and_store(report_lines, make_heading("STEP 8: MODEL TRAINING"))
-    logistic_model, scaler = train_logistic_regression(x_train, y_train)
-    random_forest_model = train_random_forest(x_train, y_train)
-    training_table = pd.DataFrame(
-        {
-            "Model": ["Logistic Regression", "Random Forest"],
-            "Purpose": [
-                "Linear baseline classification model",
-                "Tree-based ensemble classification model",
-            ],
-            "Scaling Used": ["Yes", "No"],
-        }
-    )
-    print_and_store(report_lines, format_table(training_table))
-
-    logistic_predictions = logistic_model.predict(scaler.transform(x_test))
-    random_forest_predictions = random_forest_model.predict(x_test)
-
-    metrics = [
-        evaluate_model("Logistic Regression", y_test, logistic_predictions),
-        evaluate_model("Random Forest", y_test, random_forest_predictions),
-    ]
-    metrics_table = build_metrics_table(metrics)
-
-    print_and_store(report_lines, make_heading("STEP 9: MODEL EVALUATION METRICS"))
-    print_and_store(report_lines, format_table(metrics_table))
-
-    best_model_name = metrics_table.sort_values("F1 Score", ascending=False).iloc[0]["Model"]
-    best_predictions = (
-        random_forest_predictions
-        if best_model_name == "Random Forest"
-        else logistic_predictions
-    )
-
-    print_and_store(report_lines, make_heading("STEP 10: CONFUSION MATRIX TABLES"))
-    confusion_matrix_tables = pd.concat(
+    # ── Step 7: Confusion matrices (text) ─────
+    print(heading("STEP 6: CONFUSION MATRIX TABLES"))
+    cm_tables = pd.concat(
         [
-            build_confusion_matrix_table(
-                y_test,
-                logistic_predictions,
-                "Logistic Regression",
-            ),
-            build_confusion_matrix_table(
-                y_test,
-                random_forest_predictions,
-                "Random Forest",
-            ),
+            confusion_table(y_test, lr_pred, "Logistic Regression"),
+            confusion_table(y_test, rf_pred, "Random Forest"),
         ],
         ignore_index=True,
     )
-    print_and_store(report_lines, format_table(confusion_matrix_tables))
+    print(fmt(cm_tables))
 
-    print_and_store(report_lines, make_heading("STEP 10A: CONFUSION MATRIX MEANING"))
-    matrix_meaning_table = pd.DataFrame(
+    # ── Step 8: Model comparison ──────────────
+    print(heading("STEP 7: MODEL COMPARISON"))
+    comparison = metrics.copy()
+    comparison["Rank (F1)"] = (
+        comparison["F1 Score"].rank(ascending=False, method="dense").astype(int)
+    )
+    comparison.sort_values("Rank (F1)", inplace=True)
+    print(fmt(comparison))
+
+    best_name = comparison.iloc[0]["Model"]
+    best_pred = rf_pred if best_name == "Random Forest" else lr_pred
+    print(f"\n→ Best model: {best_name}")
+
+    # ── Step 9: Feature importance ────────────
+    print(heading("STEP 8: RANDOM FOREST FEATURE IMPORTANCE"))
+    fi = pd.DataFrame(
         {
-            "Term": [
-                "Predicted Safe",
-                "Predicted Phishing",
-                "Actual Safe",
-                "Actual Phishing",
-            ],
-            "Meaning": [
-                "Model predicted the URL as safe",
-                "Model predicted the URL as phishing",
-                "URL is truly safe in the dataset",
-                "URL is truly phishing in the dataset",
-            ],
+            "Feature":    SELECTED_FEATURES,
+            "Importance": rf_model.feature_importances_.round(4),
         }
-    )
-    print_and_store(report_lines, format_table(matrix_meaning_table))
+    ).sort_values("Importance", ascending=False)
+    print(fmt(fi))
 
-    print_and_store(report_lines, make_heading("STEP 11: MODEL COMPARISON TABLE"))
-    comparison_table = metrics_table.copy()
-    comparison_table["Rank By F1 Score"] = (
-        comparison_table["F1 Score"].rank(ascending=False, method="dense").astype(int)
-    )
-    comparison_table = comparison_table.sort_values("Rank By F1 Score")
-    print_and_store(report_lines, format_table(comparison_table))
+    # ── Step 10: Sample predictions ───────────
+    print(heading("STEP 9: SAMPLE PREDICTIONS  (Logistic Regression)"))
+    samples = show_sample_predictions(lr_model, scaler, SAMPLE_URLS)
+    print(fmt(samples))
+    for _, row in samples.iterrows():
+        tag = "✅ Safe" if row["Prediction"] == "Safe" else "⚠️  Phishing"
+        print(f"  {tag}  →  {row['URL']}")
 
-    print_and_store(report_lines, make_heading("STEP 12: RANDOM FOREST FEATURE IMPORTANCE"))
-    feature_importance_table = build_feature_importance_table(
-        random_forest_model,
-        x.columns.tolist(),
-    )
-    print_and_store(report_lines, format_table(feature_importance_table.head(TOP_FEATURE_COUNT)))
-
-    show_confusion_matrix_diagram(y_test, best_predictions, best_model_name)
-    show_feature_importance_diagram(feature_importance_table)
-
-    print_and_store(report_lines, make_heading("STEP 13: DIAGRAM DISPLAY STATUS"))
-    diagram_table = pd.DataFrame(
+    # ── Step 11: Final summary ────────────────
+    print(heading("FINAL RESULT"))
+    summary = pd.DataFrame(
         {
-            "Diagram": [
-                "Confusion Matrix",
-                "Random Forest Feature Importance",
-            ],
-            "Output Method": [
-                "Displayed on screen only",
-                "Displayed on screen only",
-            ],
-            "Saved In Folder": [
-                "No",
-                "No",
-            ],
-        }
-    )
-    print_and_store(report_lines, format_table(diagram_table))
-
-    print_and_store(report_lines, make_heading("FINAL RESULT"))
-    final_result_table = pd.DataFrame(
-        {
-            "Final Output": [
-                "Best Model",
-                "Target Format",
-                "Dataset Type",
-                "Total Rows",
-                "Total Features After Encoding",
+            "Item": [
+                "Dataset",
+                "Features used",
+                "Total samples",
+                "Train / Test split",
+                "Best model",
+                "Best model accuracy",
+                "Best model F1 score",
+                "Label encoding",
             ],
             "Value": [
-                best_model_name,
-                "0 = Safe, 1 = Phishing",
-                "Labelled classification dataset",
-                len(dataset),
-                x.shape[1],
+                "PhiUSIIL Phishing URL Dataset",
+                ", ".join(SELECTED_FEATURES),
+                f"{len(X):,}",
+                "80% / 20%",
+                best_name,
+                comparison.iloc[0]["Accuracy"],
+                comparison.iloc[0]["F1 Score"],
+                "0 = Safe  |  1 = Phishing",
             ],
         }
     )
-    print_and_store(report_lines, format_table(final_result_table))
+    print(fmt(summary))
+
+    # ── Visualisations ────────────────────────
+    show_confusion_matrix(y_test, best_pred, best_name)
+    show_feature_importance(rf_model, SELECTED_FEATURES)
+    show_train_vs_test(lr_model, scaler, rf_model, X_train, y_train, X_test, y_test)
+    show_roc_curves(lr_model, scaler, rf_model, X_test, y_test)
 
 
 if __name__ == "__main__":
